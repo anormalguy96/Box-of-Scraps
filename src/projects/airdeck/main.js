@@ -9,7 +9,8 @@ const app = document.getElementById("app");
 app.appendChild(
   mountTopbar({
     title: "AirDeck",
-    subtitle: "Open palm swipe: prev/next • Point: laser • Pinch: highlight",
+    subtitle:
+      "Closed fist swipe: prev/next • Point + hold: click • Point: laser • Pinch: highlight",
     homeHref: "/",
   })
 );
@@ -36,7 +37,7 @@ panel.innerHTML = `
   </div>
 
   <div style="position:absolute; top:14px; left:16px; right:16px; display:flex; justify-content:space-between; gap:10px; z-index:5;">
-    <div class="pill mono">Open palm + swipe</div>
+    <div class="pill mono">Closed fist + swipe</div>
     <div class="pill mono">ESC: stop</div>
   </div>
 `;
@@ -47,9 +48,9 @@ const overlay = document.getElementById("overlay");
 const octx = overlay.getContext("2d");
 
 const slides = [
-  { title: "AirDeck", bullets: ["Gesture slides", "Laser pointer", "Highlight"] },
-  { title: "Gestures", bullets: ["Open palm swipe: prev/next", "Point: laser", "Pinch: highlight"] },
-  { title: "Notes", bullets: ["Good light helps", "Keep hand ~40–60cm away", "Fast swipe works better"] },
+  { title: "AirDeck", bullets: ["Gesture slides", "Laser pointer", "Highlight", "Point + hold to click"] },
+  { title: "Gestures", bullets: ["Closed fist swipe: prev/next", "Point: laser + click", "Pinch: highlight"] },
+  { title: "Notes", bullets: ["Good light helps", "Keep hand ~40–60cm away", "Hold pointer steady to click"] },
   { title: "Next", bullets: ["Two-hand mode", "Better swipe filter", "Per-slide notes"] },
 ];
 
@@ -128,6 +129,67 @@ function detectThrottled(now) {
   return lastRes;
 }
 
+/** ---- closed fist detection (local, based on landmarks)
+ * your gestures.js doesn't return "fist", so we compute it here
+ */
+function isFingerOpen(lm, tip, pip) {
+  // y axis is top→down in video coords
+  return (lm[tip].y + 0.01) < lm[pip].y;
+}
+function isClosedFist(res) {
+  const lm = res?.landmarks?.[0];
+  if (!lm || lm.length < 21) return false;
+
+  const indexOpen = isFingerOpen(lm, 8, 6);
+  const middleOpen = isFingerOpen(lm, 12, 10);
+  const ringOpen = isFingerOpen(lm, 16, 14);
+  const pinkyOpen = isFingerOpen(lm, 20, 18);
+
+  // thumb ignored, because it varies a lot
+  return !indexOpen && !middleOpen && !ringOpen && !pinkyOpen;
+}
+
+/** ---- Point-to-click (dwell) ---- */
+let hoverEl = null;
+let dwellStartAt = 0;
+let clickCooldownFrames = 0;
+
+const DWELL_MS = 650;
+const COOLDOWN_FRAMES = 18;
+
+function toClientPoint(cursor, panelEl) {
+  const r = panelEl.getBoundingClientRect();
+  return { x: r.left + cursor.x, y: r.top + cursor.y };
+}
+
+function findClickableAt(clientX, clientY, panelEl) {
+  const el = document.elementFromPoint(clientX, clientY);
+  if (!el) return null;
+  if (!panelEl.contains(el)) return null;
+
+  // Only allow clicks on these controls
+  const btn = el.closest("button, a, [role='button']");
+  return btn || null;
+}
+
+function setHover(el) {
+  if (hoverEl === el) return;
+
+  if (hoverEl) hoverEl.style.outline = "";
+
+  hoverEl = el;
+  dwellStartAt = 0;
+
+  if (hoverEl) {
+    hoverEl.style.outline = "2px solid rgba(255,77,109,.8)";
+    hoverEl.style.outlineOffset = "2px";
+  }
+}
+
+function clickElement(el) {
+  el.click();
+}
+
 // swipe filter (less accidental triggers)
 let lastWrist = null;
 let swipeAccum = 0;
@@ -179,28 +241,58 @@ async function start() {
       octx.stroke();
     }
 
-    // highlight
+    // highlight (pinch)
     if (g.pinch && cursor) {
       octx.fillStyle = "rgba(180,255,159,.18)";
       octx.fillRect(cursor.x - 140, cursor.y - 40, 280, 80);
     }
 
-    // swipe
+    // ---- Point + hold to click (no spam) ----
+    if (clickCooldownFrames > 0) clickCooldownFrames--;
+
+    if (g.point && cursor) {
+      const pt = toClientPoint(cursor, panel);
+      const target = findClickableAt(pt.x, pt.y, panel);
+
+      setHover(target);
+
+      if (target) {
+        if (!dwellStartAt) dwellStartAt = now;
+
+        const heldMs = now - dwellStartAt;
+        if (heldMs >= DWELL_MS && clickCooldownFrames <= 0) {
+          clickElement(target);
+          clickCooldownFrames = COOLDOWN_FRAMES;
+          dwellStartAt = 0;
+        }
+      } else {
+        dwellStartAt = 0;
+      }
+    } else {
+      setHover(null);
+      dwellStartAt = 0;
+    }
+
+    // ---- Swipe with CLOSED FIST (instead of openPalm) ----
     if (swipeCooldown > 0) swipeCooldown--;
 
-    if (g.openPalm && g.wrist) {
+    const closedFist = isClosedFist(res);
+
+    // prevent swipe while pointing or pinching (so behaviors don't fight)
+    const swipeEnabled = closedFist && !g.point && !g.pinch;
+
+    if (swipeEnabled && g.wrist) {
       if (lastWrist) {
         const vx = g.wrist.x - lastWrist.x;
 
-        // accumulate motion; reset if direction changes
         if (Math.sign(vx) !== Math.sign(swipeAccum)) swipeAccum = 0;
         swipeAccum += vx;
 
-        // require “real” swipe, not tiny jitter
         const TRIGGER = 0.12;
         if (Math.abs(swipeAccum) > TRIGGER && swipeCooldown <= 0) {
           if (swipeAccum > 0) prev();
           else next();
+
           swipeCooldown = 18;
           swipeAccum = 0;
         }
