@@ -3,13 +3,16 @@ import { mountTopbar, setPill } from "../../shared/ui/pageShell.js";
 import { createHandTracker } from "../../shared/hand/handTracker.js";
 import { classifyGesture } from "../../shared/hand/gestures.js";
 import { fitCanvasToElement } from "../../shared/ui/canvasFit.js";
+import { drawHandSkeleton } from "../../shared/hand/handViz.js";
+import * as THREE from "three";
 
+/* ---------- UI ---------- */
 const app = document.getElementById("app");
 
 app.appendChild(
   mountTopbar({
-    title: "AirDeck",
-    subtitle: "Open palm swipe = next/prev • Point = laser • Pinch = highlight",
+    title: "3D Quantum Galaxy",
+    subtitle: "Open palm: orbit • Pinch: zoom • Fist: burst",
     homeHref: "/",
   })
 );
@@ -22,96 +25,160 @@ panel.style.background = "rgba(255,255,255,.04)";
 panel.style.boxShadow = "var(--shadow)";
 panel.style.overflow = "hidden";
 panel.style.position = "relative";
-panel.style.height = "68vh";
+panel.style.height = "70vh";
 panel.innerHTML = `
-  <div id="slide" style="position:absolute; inset:0; padding:26px; display:flex; flex-direction:column; gap:14px;"></div>
-  <canvas id="overlay" style="position:absolute; inset:0; pointer-events:none;"></canvas>
+  <div style="position:absolute; inset:0;">
+    <canvas id="gl" style="width:100%; height:100%; display:block;"></canvas>
+    <canvas id="hud" style="position:absolute; inset:0; pointer-events:none;"></canvas>
+  </div>
 
   <div style="position:absolute; inset:auto 16px 16px 16px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; z-index:5;">
     <button class="btn primary" id="startBtn">Start camera</button>
-    <button class="btn" id="prevBtn">Prev</button>
-    <button class="btn" id="nextBtn">Next</button>
+    <button class="btn" id="burstBtn">Burst</button>
     <span class="pill mono" id="gesturePill">gesture: none</span>
-    <span class="pill mono" id="slidePill">slide: 1/4</span>
+    <span class="pill mono" id="fpsPill">fps: --</span>
   </div>
 
   <div style="position:absolute; top:14px; left:16px; right:16px; display:flex; justify-content:space-between; gap:10px; z-index:5;">
-    <div class="pill mono">Try: open palm swipe</div>
-    <div class="pill mono">ESC → stop</div>
+    <div class="pill mono">Keep hand in frame</div>
+    <div class="pill mono">ESC: stop</div>
   </div>
 `;
 app.appendChild(panel);
 
-const slideEl = document.getElementById("slide");
-const overlay = document.getElementById("overlay");
+const glCanvas = document.getElementById("gl");
+const hudCanvas = document.getElementById("hud");
+const hctx = hudCanvas.getContext("2d");
+const gesturePill = document.getElementById("gesturePill");
+const fpsPill = document.getElementById("fpsPill");
 
-if (!slideEl || !overlay) {
-  throw new Error("AirDeck: slide or overlay element not found. Check IDs in HTML.");
+/* ---------- Resize (no per-frame reflow) ---------- */
+let lastSizeKey = "";
+function resizeIfNeeded(renderer, camera) {
+  const r = panel.getBoundingClientRect();
+  const key = `${Math.round(r.width)}x${Math.round(r.height)}`;
+  if (key === lastSizeKey) return;
+  lastSizeKey = key;
+
+  // fit HUD canvas to panel
+  fitCanvasToElement(hudCanvas, panel);
+
+  // set GL size to match panel
+  renderer.setSize(Math.floor(r.width), Math.floor(r.height), false);
+  camera.aspect = r.width / r.height;
+  camera.updateProjectionMatrix();
 }
 
-const octx = overlay.getContext("2d");
-if (!octx) {
-  throw new Error("AirDeck: could not get 2D canvas context (overlay.getContext returned null).");
+/* ---------- Three.js scene ---------- */
+const renderer = new THREE.WebGLRenderer({
+  canvas: glCanvas,
+  antialias: true,
+  alpha: true,
+  powerPreference: "high-performance",
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.6));
+
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 200);
+camera.position.set(0, 0, 18);
+
+const group = new THREE.Group();
+scene.add(group);
+
+// Soft fog for depth
+scene.fog = new THREE.FogExp2(0x000000, 0.035);
+
+// lights (subtle)
+const amb = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(amb);
+
+const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+dir.position.set(8, 10, 12);
+scene.add(dir);
+
+/* ---------- Galaxy particles ---------- */
+const STAR_COUNT = 14000;
+
+const positions = new Float32Array(STAR_COUNT * 3);
+const colors = new Float32Array(STAR_COUNT * 3);
+const base = new Float32Array(STAR_COUNT * 3);
+const velocities = new Float32Array(STAR_COUNT * 3);
+
+function randn() {
+  // Box-Muller
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
-const slides = [
-  {
-    title: "Tony Stark Mode",
-    bullets: ["Hand gestures as UI input", "Static hosting (Netlify)", "No sensors, no gloves — just a webcam"],
-  },
-  {
-    title: "Gesture Map",
-    bullets: ["Open palm + swipe → Next / Prev", "Point → Laser pointer", "Pinch → Highlight mode"],
-  },
-  {
-    title: "Why this works",
-    bullets: ["MediaPipe detects 21 hand landmarks", "We classify gestures with simple geometry", "Then map gestures → UI actions"],
-  },
-  {
-    title: "Next upgrades",
-    bullets: ["Two hands (left = control, right = action)", "Smoother swipe detection", "Add drawing/annotation per slide"],
-  },
-];
+function buildGalaxy() {
+  for (let i = 0; i < STAR_COUNT; i++) {
+    const idx = i * 3;
 
-let idx = 0;
+    // spiral-ish: radius + arm angle
+    const r = Math.pow(Math.random(), 0.55) * 10.0;
+    const arm = (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.7);
+    const angle = r * 0.55 * arm + randn() * 0.06;
 
-function renderSlide() {
-  const s = slides[idx];
-  slideEl.innerHTML = `
-    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
-      <div style="font-size:34px; font-weight:800; letter-spacing:.3px">${s.title}</div>
-      <div class="pill mono" style="align-self:center;">AirDeck</div>
-    </div>
-    <div style="height:1px; background:rgba(255,255,255,.10); margin-top:4px;"></div>
-    <div style="display:grid; gap:10px; margin-top:8px;">
-      ${s.bullets
-        .map(
-          (b) => `
-        <div style="display:flex; gap:10px; align-items:flex-start;">
-          <div style="width:10px; height:10px; border-radius:99px; background:rgba(125,249,255,.9); margin-top:8px;"></div>
-          <div style="font-size:18px; color:rgba(255,255,255,.82); line-height:1.35">${b}</div>
-        </div>`
-        )
-        .join("")}
-    </div>
-    <div style="margin-top:auto;" class="small">
-      Tip: better lighting improves tracking.
-    </div>
-  `;
-  document.getElementById("slidePill").textContent = `slide: ${idx + 1}/${slides.length}`;
-}
-renderSlide();
+    const x = Math.cos(angle) * r + randn() * 0.18;
+    const y = randn() * 0.35;
+    const z = Math.sin(angle) * r + randn() * 0.18;
 
-function next() {
-  idx = (idx + 1) % slides.length;
-  renderSlide();
-}
-function prev() {
-  idx = (idx - 1 + slides.length) % slides.length;
-  renderSlide();
+    positions[idx + 0] = x;
+    positions[idx + 1] = y;
+    positions[idx + 2] = z;
+
+    base[idx + 0] = x;
+    base[idx + 1] = y;
+    base[idx + 2] = z;
+
+    // gentle core tint → outer tint
+    const t = Math.min(1, r / 10);
+    const c1 = new THREE.Color(0x7df9ff);
+    const c2 = new THREE.Color(0xff4d6d);
+    const c = c1.clone().lerp(c2, t * 0.55);
+    colors[idx + 0] = c.r;
+    colors[idx + 1] = c.g;
+    colors[idx + 2] = c.b;
+
+    velocities[idx + 0] = 0;
+    velocities[idx + 1] = 0;
+    velocities[idx + 2] = 0;
+  }
 }
 
-// Hidden video
+buildGalaxy();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+const mat = new THREE.PointsMaterial({
+  size: 0.045,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.95,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const points = new THREE.Points(geom, mat);
+group.add(points);
+
+// faint core glow sphere
+const core = new THREE.Mesh(
+  new THREE.SphereGeometry(0.85, 24, 24),
+  new THREE.MeshBasicMaterial({
+    color: 0x7df9ff,
+    transparent: true,
+    opacity: 0.06,
+  })
+);
+group.add(core);
+
+/* ---------- Gesture / camera ---------- */
 const video = document.createElement("video");
 video.setAttribute("playsinline", "true");
 video.style.position = "absolute";
@@ -124,91 +191,181 @@ document.body.appendChild(video);
 let tracker = null;
 let rafId = null;
 
-// swipe stability
+/* throttled detection (stable) */
+let lastDetectAt = 0;
+let lastRes = null;
+function detectThrottled(now) {
+  if (!tracker) return null;
+  if (now - lastDetectAt >= 33) {
+    lastRes = tracker.detect(now);
+    lastDetectAt = now;
+  }
+  return lastRes;
+}
+
+/* orbit + zoom controls */
+let yaw = 0;
+let pitch = 0;
+let targetYaw = 0;
+let targetPitch = 0;
+
+let zoom = 18;
+let targetZoom = 18;
+
 let lastWrist = null;
-let swipeCooldown = 0;
 
-// resize stability
-let lastSizeKey = "";
+/* simple fist check (more forgiving) */
+function isFingerOpen(lm, tip, pip) {
+  return (lm[tip].y + 0.01) < lm[pip].y;
+}
+function isFist(res, g) {
+  const lm = res?.landmarks?.[0];
+  if (!lm || lm.length < 21) return false;
+  if (g.pinch || g.openPalm || g.point) return false;
 
-function resizeIfNeeded() {
-  const rect = panel.getBoundingClientRect();
-  const key = `${Math.round(rect.width)}x${Math.round(rect.height)}`;
-  if (key === lastSizeKey) return;
-  lastSizeKey = key;
-  fitCanvasToElement(overlay, panel);
+  const indexOpen = isFingerOpen(lm, 8, 6);
+  const middleOpen = isFingerOpen(lm, 12, 10);
+  const ringOpen = isFingerOpen(lm, 16, 14);
+  const pinkyOpen = isFingerOpen(lm, 20, 18);
+
+  return !indexOpen && !middleOpen && !ringOpen && !pinkyOpen;
 }
 
-function screenPoint(norm, w, h) {
-  // mirror horizontally for pointer visuals (feels natural)
-  return { x: (1 - norm.x) * w, y: norm.y * h };
+/* burst */
+let burstCooldown = 0;
+function burst() {
+  // kick particles outward briefly
+  for (let i = 0; i < STAR_COUNT; i++) {
+    const idx = i * 3;
+    const x = positions[idx + 0];
+    const y = positions[idx + 1];
+    const z = positions[idx + 2];
+
+    const len = Math.max(0.001, Math.hypot(x, y, z));
+    const k = 0.08 + Math.random() * 0.10;
+
+    velocities[idx + 0] += (x / len) * k;
+    velocities[idx + 1] += (y / len) * (k * 0.45);
+    velocities[idx + 2] += (z / len) * k;
+  }
+  burstCooldown = 28;
 }
+
+/* fps counter */
+let fpsLast = performance.now();
+let fpsFrames = 0;
+let fpsValue = 0;
 
 async function start() {
   if (tracker) return;
 
-  setPill("starting…");
+  setPill("starting");
   tracker = await createHandTracker({ videoEl: video, numHands: 1 });
-  setPill("camera: on");
-
-  const gesturePill = document.getElementById("gesturePill");
-  resizeIfNeeded();
+  setPill("camera on");
 
   function tick(now) {
     rafId = requestAnimationFrame(tick);
 
-    resizeIfNeeded();
-    const w = overlay.width;
-    const h = overlay.height;
+    resizeIfNeeded(renderer, camera);
 
-    const res = tracker.detect(now);
+    // fps
+    fpsFrames++;
+    if (now - fpsLast > 500) {
+      fpsValue = Math.round((fpsFrames * 1000) / (now - fpsLast));
+      fpsFrames = 0;
+      fpsLast = now;
+      fpsPill.textContent = `fps: ${fpsValue}`;
+    }
+
+    // detection
+    const res = detectThrottled(now);
     const g = classifyGesture(res?.landmarks);
     gesturePill.textContent = `gesture: ${g.name}`;
 
-    octx.clearRect(0, 0, w, h);
+    // HUD
+    hctx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+    drawHandSkeleton(hctx, res?.landmarks, hudCanvas.width, hudCanvas.height, {
+      mirrorX: true,
+      lineWidth: 2,
+      jointRadius: 3.1,
+    });
 
-    const cursor = g.cursor ? screenPoint(g.cursor, w, h) : null;
-
-    // Laser pointer (point gesture)
-    if (g.point && cursor) {
-      octx.fillStyle = "rgba(255,77,109,.95)";
-      octx.beginPath();
-      octx.arc(cursor.x, cursor.y, 10, 0, Math.PI * 2);
-      octx.fill();
-
-      octx.strokeStyle = "rgba(255,77,109,.35)";
-      octx.lineWidth = 2;
-      octx.beginPath();
-      octx.arc(cursor.x, cursor.y, 26, 0, Math.PI * 2);
-      octx.stroke();
-    }
-
-    // Pinch → highlight mode
-    if (g.pinch && cursor) {
-      octx.fillStyle = "rgba(180,255,159,.18)";
-      octx.fillRect(cursor.x - 140, cursor.y - 40, 280, 80);
-    }
-
-    // Swipe detection: open palm + strong horizontal wrist velocity
-    if (swipeCooldown > 0) swipeCooldown -= 1;
-
+    // orbit control (open palm)
     if (g.openPalm && g.wrist) {
-      if (lastWrist && swipeCooldown <= 0) {
-        const vx = g.wrist.x - lastWrist.x;
+      if (lastWrist) {
+        const dx = g.wrist.x - lastWrist.x;
+        const dy = g.wrist.y - lastWrist.y;
 
-        // threshold: tune this if too sensitive / not sensitive enough
-        if (Math.abs(vx) > 0.035) {
-          // If direction feels reversed, swap prev/next here.
-          if (vx > 0) prev();
-          else next();
+        // mirror x for natural feel
+        targetYaw += (-dx) * 3.2;
+        targetPitch += (dy) * 2.6;
 
-          swipeCooldown = 18; // frames cooldown (~300ms at 60fps)
-        }
+        // clamp pitch
+        targetPitch = Math.max(-1.0, Math.min(1.0, targetPitch));
       }
       lastWrist = g.wrist;
     } else {
       lastWrist = null;
     }
+
+    // zoom (pinch)
+    if (g.pinch && g.cursor) {
+      // cursor.y: 0 top → 1 bottom
+      // map upward hand to zoom in
+      const zWant = 12 + (g.cursor.y * 12);
+      targetZoom = Math.max(9.5, Math.min(24, zWant));
+    } else {
+      // ease back a bit
+      targetZoom = Math.max(11, Math.min(22, targetZoom));
+    }
+
+    // fist burst (with cooldown)
+    if (burstCooldown > 0) burstCooldown--;
+    const fist = isFist(res, g);
+    if (fist && burstCooldown <= 0) burst();
+
+    // smooth camera & group
+    yaw += (targetYaw - yaw) * 0.08;
+    pitch += (targetPitch - pitch) * 0.08;
+    zoom += (targetZoom - zoom) * 0.08;
+
+    camera.position.set(
+      Math.sin(yaw) * zoom * Math.cos(pitch),
+      Math.sin(pitch) * zoom,
+      Math.cos(yaw) * zoom * Math.cos(pitch)
+    );
+    camera.lookAt(0, 0, 0);
+
+    // rotate galaxy slightly
+    group.rotation.y += 0.0012;
+    group.rotation.x += 0.0006;
+
+    // particle spring back + velocity damping
+    const pos = geom.attributes.position.array;
+    for (let i = 0; i < STAR_COUNT; i++) {
+      const idx = i * 3;
+
+      // velocity
+      velocities[idx + 0] *= 0.92;
+      velocities[idx + 1] *= 0.92;
+      velocities[idx + 2] *= 0.92;
+
+      // spring to base
+      const sx = (base[idx + 0] - pos[idx + 0]) * 0.006;
+      const sy = (base[idx + 1] - pos[idx + 1]) * 0.006;
+      const sz = (base[idx + 2] - pos[idx + 2]) * 0.006;
+
+      velocities[idx + 0] += sx;
+      velocities[idx + 1] += sy;
+      velocities[idx + 2] += sz;
+
+      pos[idx + 0] += velocities[idx + 0];
+      pos[idx + 1] += velocities[idx + 1];
+      pos[idx + 2] += velocities[idx + 2];
+    }
+    geom.attributes.position.needsUpdate = true;
+
+    renderer.render(scene, camera);
   }
 
   rafId = requestAnimationFrame(tick);
@@ -223,29 +380,17 @@ function stop() {
     tracker = null;
   }
 
-  setPill("camera: off");
-  lastWrist = null;
-  swipeCooldown = 0;
-  octx.clearRect(0, 0, overlay.width, overlay.height);
+  setPill("camera off");
 }
 
 document.getElementById("startBtn").addEventListener("click", start);
-document.getElementById("nextBtn").addEventListener("click", next);
-document.getElementById("prevBtn").addEventListener("click", prev);
+document.getElementById("burstBtn").addEventListener("click", burst);
 
-window.addEventListener("resize", resizeIfNeeded);
+window.addEventListener("resize", () => resizeIfNeeded(renderer, camera));
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") stop();
 });
 
-// Stop camera when tab is hidden (prevents “camera stuck on”)
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) stop();
-});
-window.addEventListener("beforeunload", stop);
-
-const note = document.createElement("div");
-note.className = "small";
-note.style.marginTop = "12px";
-note.textContent = "Make it yours: edit slides inside src/projects/airdeck/main.js";
-app.appendChild(note);
+// initial size
+resizeIfNeeded(renderer, camera);
+renderer.render(scene, camera);

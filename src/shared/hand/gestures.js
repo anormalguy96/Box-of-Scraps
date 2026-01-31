@@ -1,53 +1,78 @@
-// Very lightweight, “good enough for demos” gesture heuristics over 21 hand landmarks.
-// Landmarks are normalized coordinates (x,y in [0..1]), y increases downward.
+let pinchOn = false;
 
-function dist(a,b){
+function dist(a, b) {
   const dx = a.x - b.x;
   const dy = a.y - b.y;
   return Math.hypot(dx, dy);
 }
 
-function fingerExtended(lm, tip, pip){
-  return lm[tip].y < lm[pip].y;
+function isFingerOpen(lm, tip, pip) {
+  // y axis is top→down in video coords
+  return (lm[tip].y + 0.01) < lm[pip].y;
 }
 
-function thumbExtended(lm){
-  // crude: thumb tip farther from index MCP than thumb IP is
-  return dist(lm[4], lm[5]) > dist(lm[3], lm[5]) * 1.05;
-}
+export function classifyGesture(allLandmarks) {
+  if (!allLandmarks || allLandmarks.length === 0) {
+    return {
+      name: "none",
+      point: false,
+      pinch: false,
+      openPalm: false,
+      wrist: null,
+      cursor: null,
+    };
+  }
 
-export function classifyGesture(landmarks){
-  if(!landmarks || landmarks.length === 0) return { name: "none" };
-  const lm = landmarks[0];
+  const lm = allLandmarks[0];
+  if (!lm || lm.length < 21) {
+    return {
+      name: "none",
+      point: false,
+      pinch: false,
+      openPalm: false,
+      wrist: null,
+      cursor: null,
+    };
+  }
 
-  const idx = fingerExtended(lm, 8, 6);
-  const mid = fingerExtended(lm, 12, 10);
-  const ring = fingerExtended(lm, 16, 14);
-  const pink = fingerExtended(lm, 20, 18);
-  const th = thumbExtended(lm);
+  const wrist = lm[0];
+  const indexTip = lm[8];
+  const thumbTip = lm[4];
 
-  const pinch = dist(lm[4], lm[8]) < 0.055; // tune for your camera
-  const openPalm = th && idx && mid && ring && pink;
-  const point = idx && !mid && !ring && !pink;
-  const fist = !idx && !mid && !ring && !pink && !th;
+  // scale distances by palm size (more stable across hands)
+  const palmSize = Math.max(0.0001, dist(lm[0], lm[9]));
+  const pinchRatio = dist(thumbTip, indexTip) / palmSize;
 
-  // Useful “cursor”: index tip (8) or pinch midpoint
-  const pinchPoint = { x: (lm[4].x + lm[8].x)/2, y: (lm[4].y + lm[8].y)/2 };
+  const indexOpen = isFingerOpen(lm, 8, 6);
+  const middleOpen = isFingerOpen(lm, 12, 10);
+  const ringOpen = isFingerOpen(lm, 16, 14);
+  const pinkyOpen = isFingerOpen(lm, 20, 18);
 
-  let name = "unknown";
-  if(pinch) name = "pinch";
-  else if(openPalm) name = "open_palm";
-  else if(point) name = "point";
-  else if(fist) name = "fist";
+  // point = index open, others mostly closed
+  const point = indexOpen && !middleOpen && !ringOpen && !pinkyOpen;
+
+  // open palm = four fingers open (thumb optional)
+  const openPalm = indexOpen && middleOpen && ringOpen && pinkyOpen;
+
+  // pinch hysteresis
+  const PINCH_ON = 0.22;
+  const PINCH_OFF = 0.30;
+  if (!pinchOn && pinchRatio < PINCH_ON) pinchOn = true;
+  else if (pinchOn && pinchRatio > PINCH_OFF) pinchOn = false;
+
+  const pinch = pinchOn;
+
+  let name = "none";
+  if (pinch) name = "pinch";
+  else if (point) name = "point";
+  else if (openPalm) name = "open_palm";
 
   return {
     name,
+    point,
     pinch,
     openPalm,
-    point,
-    fist,
-    fingers: { thumb: th, index: idx, middle: mid, ring, pinky: pink },
-    cursor: pinch ? pinchPoint : { x: lm[8].x, y: lm[8].y },
-    wrist: { x: lm[0].x, y: lm[0].y },
+    wrist,
+    cursor: indexTip,
   };
 }

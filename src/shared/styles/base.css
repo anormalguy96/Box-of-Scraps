@@ -1,3 +1,14 @@
+@import url("https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Share+Tech+Mono&display=swap");
+
+:root{
+  --font-ui: "Orbitron", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  --font-mono: "Share Tech Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  --glowA: 0 0 10px rgba(125,249,255,.22);
+  --glowB: 0 0 18px rgba(125,249,255,.10);
+  --textGlow: var(--glowA), var(--glowB);
+}
+
 :root{
   --bg: #070A12;
   --panel: rgba(255,255,255,.06);
@@ -116,4 +127,65 @@ a:hover{ text-decoration: underline; }
 
 @media (max-width: 860px){
   .card{ grid-column: span 12; }
+}
+html, body{
+  font-family: var(--font-ui);
+}
+
+/* Mono text stays mono */
+.mono{
+  font-family: var(--font-mono);
+}
+
+/* Gentle glow for readable “tech” look */
+h1, h2, h3, .topbar, .pill, .btn, a{
+  text-shadow: var(--textGlow);
+}
+
+/* Optional: make small text less glowy */
+.small{
+  text-shadow: 0 0 8px rgba(125,249,255,.10);
+}
+
+/* Dynamic, chaotic tech background */
+body{
+  background:
+    radial-gradient(1100px 700px at 15% 20%, rgba(125,249,255,.10), transparent 55%),
+    radial-gradient(900px 600px at 85% 30%, rgba(255,77,109,.08), transparent 60%),
+    radial-gradient(900px 700px at 55% 85%, rgba(180,255,159,.06), transparent 62%),
+    linear-gradient(135deg, rgba(10,12,18,1) 0%, rgba(8,10,16,1) 40%, rgba(12,14,22,1) 100%);
+  background-size: 160% 160%;
+  animation: bgShift 12s ease-in-out infinite alternate;
+}
+
+/* Scanline overlay */
+body::before{
+  content:"";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255,255,255,.05) 0px,
+    rgba(255,255,255,.05) 1px,
+    rgba(0,0,0,0) 3px,
+    rgba(0,0,0,0) 6px
+  );
+  opacity: .08;
+  mix-blend-mode: overlay;
+}
+
+/* Soft vignette */
+body::after{
+  content:"";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 40%, transparent 35%, rgba(0,0,0,.55) 100%);
+  opacity: .55;
+}
+
+@keyframes bgShift{
+  from{ background-position: 0% 0%; }
+  to{ background-position: 100% 100%; }
 }
